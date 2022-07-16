@@ -10,6 +10,8 @@ export const enum NothingSelected {
   insertInline,
   /** Insert `<url>` */
   insertBare,
+  /** Insert `[title (fetched from url)](url)` */
+  insertInlineWithTitle,
 }
 
 export interface PluginSettings {
@@ -58,6 +60,7 @@ export class UrlIntoSelectionSettingsTab extends PluginSettingTab {
           1: "Auto Select",
           2: "Insert [](url)",
           3: "Insert <url>",
+          4: "Insert [title](url) (title fetched from url)",
         };
 
         dropdown

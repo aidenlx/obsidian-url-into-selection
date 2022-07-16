@@ -1,7 +1,7 @@
 import assertNever from "assert-never";
 import { NothingSelected, PluginSettings } from "setting";
 import fileUrl from "file-url";
-import { Editor, EditorPosition, EditorRange } from "obsidian";
+import { Editor, EditorPosition, EditorRange, Notice, request } from "obsidian";
 
 // https://www.oreilly.com/library/view/regular-expressions-cookbook/9781449327453/ch08s18.html
 const win32Path = /^[a-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*[^\\/:*?"<>|\r\n]*$/i;
@@ -13,16 +13,31 @@ const testFilePath = (url: string) => win32Path.test(url) || unixPath.test(url);
  * @param cbString text on clipboard
  * @param settings plugin settings
  */
-export default function UrlIntoSelection(editor: Editor, cbString: string, settings: PluginSettings): void;
+export default function UrlIntoSelection(
+  editor: Editor,
+  cbString: string,
+  settings: PluginSettings
+): void;
 /**
  * @param editor Obsidian Editor Instance
  * @param cbEvent clipboard event
  * @param settings plugin settings
  */
-export default function UrlIntoSelection(editor: Editor, cbEvent: ClipboardEvent, settings: PluginSettings): void;
-export default function UrlIntoSelection(editor: Editor, cb: string | ClipboardEvent, settings: PluginSettings): void {
+export default function UrlIntoSelection(
+  editor: Editor,
+  cbEvent: ClipboardEvent,
+  settings: PluginSettings
+): void;
+export default function UrlIntoSelection(
+  editor: Editor,
+  cb: string | ClipboardEvent,
+  settings: PluginSettings
+): void {
   // skip all if nothing should be done
-  if (!editor.somethingSelected() && settings.nothingSelected === NothingSelected.doNothing)
+  if (
+    !editor.somethingSelected() &&
+    settings.nothingSelected === NothingSelected.doNothing
+  )
     return;
 
   if (typeof cb !== "string" && cb.clipboardData === null) {
@@ -34,17 +49,62 @@ export default function UrlIntoSelection(editor: Editor, cb: string | ClipboardE
   if (clipboardText === null) return;
 
   const { selectedText, replaceRange } = getSelnRange(editor, settings);
-  const replaceText = getReplaceText(clipboardText, selectedText, settings);
+  const [replaceText, linktext, url] = getReplaceText(
+    clipboardText,
+    selectedText,
+    settings
+  );
   if (replaceText === null) return;
 
   // apply changes
   if (typeof cb !== "string") cb.preventDefault(); // prevent default paste behavior
-  replace(editor, replaceText, replaceRange);
+
+  let placeholder: string | undefined;
+
+  if (replaceText) replace(editor, replaceText, replaceRange);
+
+  if (
+    settings.nothingSelected === NothingSelected.insertInlineWithTitle &&
+    ([placeholder] = linktext.match(placeholderPattern) ?? [])
+  ) {
+    request({ url })
+      .then((html) => {
+        const title = html.match(/<title[^>]*>(.*?)<\/title>/i)?.[1];
+        if (title) {
+          if (!findAndReplace(editor, placeholder, title)) {
+            console.log("placeholder not found, skipping");
+          }
+        } else throw new Error("no title found in html for given url");
+      })
+      .catch((error) => {
+        new Notice(
+          `Failed to fetch title from ${url}, check console for details`
+        );
+        console.error(`Failed to fetch title from ${url}`, error);
+        // remove placeholder if failed
+        findAndReplace(editor, placeholder, "");
+      });
+  }
 
   // if nothing is selected and the nothing selected behavior is to insert [](url) place the cursor between the square brackets
-  if ((selectedText === "") && settings.nothingSelected === NothingSelected.insertInline) {
-    editor.setCursor({ ch: replaceRange.from.ch + 1, line: replaceRange.from.line });
+  if (
+    selectedText === "" &&
+    settings.nothingSelected === NothingSelected.insertInline
+  ) {
+    editor.setCursor({
+      ch: replaceRange.from.ch + 1,
+      line: replaceRange.from.line,
+    });
   }
+}
+
+function findAndReplace(editor: Editor, query: string, replacement: string) {
+  const cursor = editor.searchCursor(query);
+  if (!cursor.findNext()) {
+    return false;
+  }
+  cursor.replace(replacement);
+  return true;
 }
 
 function getSelnRange(editor: Editor, settings: PluginSettings) {
@@ -62,6 +122,7 @@ function getSelnRange(editor: Editor, settings: PluginSettings) {
         break;
       case NothingSelected.insertInline:
       case NothingSelected.insertBare:
+      case NothingSelected.insertInlineWithTitle:
         replaceRange = getCursor(editor);
         selectedText = "";
         break;
@@ -97,6 +158,9 @@ function isImgEmbed(text: string, settings: PluginSettings): boolean {
   return false;
 }
 
+const getPlaceholder = () => `%%UIS_TITLE_${Date.now()}%%`;
+const placeholderPattern = /^%%UIS_TITLE_\d+%%$/;
+
 /**
  * Validate that either the text on the clipboard or the selected text is a link, and if so return the link as
  * a markdown link with the selected text as the link's text, or, if the value on the clipboard is not a link
@@ -107,8 +171,11 @@ function isImgEmbed(text: string, settings: PluginSettings): boolean {
  * @param settings plugin settings
  * @returns a mardown link or image link if the clipboard or selction value is a valid link, else null.
  */
-function getReplaceText(clipboardText: string, selectedText: string, settings: PluginSettings): string | null {
-
+function getReplaceText(
+  clipboardText: string,
+  selectedText: string,
+  settings: PluginSettings
+): [text: string, linktext: string, url: string] | [text: null] {
   let linktext: string;
   let url: string;
 
@@ -120,14 +187,28 @@ function getReplaceText(clipboardText: string, selectedText: string, settings: P
     url = selectedText;
   } else return null; // if neither of two is an URL, the following code would be skipped.
 
+  // insert placeholder if no linktext is given
+  // will be replaced when title is obtained
+  if (
+    settings.nothingSelected === NothingSelected.insertInlineWithTitle &&
+    !linktext.trim() &&
+    // only try fetching title if device is online
+    navigator.onLine
+  ) {
+    linktext = getPlaceholder();
+  }
+
   const imgEmbedMark = isImgEmbed(clipboardText, settings) ? "!" : "";
 
   url = processUrl(url);
 
-  if (selectedText === "" && settings.nothingSelected === NothingSelected.insertBare) {
-    return `<${url}>`;
+  if (
+    selectedText === "" &&
+    settings.nothingSelected === NothingSelected.insertBare
+  ) {
+    return [`<${url}>`, linktext, url];
   } else {
-    return imgEmbedMark + `[${linktext}](${url})`;
+    return [imgEmbedMark + `[${linktext}](${url})`, linktext, url];
   }
 }
 
@@ -162,10 +243,13 @@ function getCbText(cb: string | ClipboardEvent): string | null {
   return clipboardText.trim();
 }
 
-function getWordBoundaries(editor: Editor, settings: PluginSettings): EditorRange {
+function getWordBoundaries(
+  editor: Editor,
+  settings: PluginSettings
+): EditorRange {
   const cursor = editor.getCursor();
   const line = editor.getLine(cursor.line);
-  let wordBoundaries = findWordAt(line, cursor);;
+  let wordBoundaries = findWordAt(line, cursor);
 
   // If the token the cursor is on is a url, grab the whole thing instead of just parsing it like a word
   let start = wordBoundaries.from.ch;
@@ -183,27 +267,34 @@ const findWordAt = (() => {
   const nonASCIISingleCaseWordChar = /[\u00df\u0587\u0590-\u05f4\u0600-\u06ff\u3040-\u309f\u30a0-\u30ff\u3400-\u4db5\u4e00-\u9fcc\uac00-\ud7af]/;
 
   function isWordChar(char: string) {
-    return /\w/.test(char) || char > "\x80" &&
-      (char.toUpperCase() != char.toLowerCase() || nonASCIISingleCaseWordChar.test(char));
+    return (
+      /\w/.test(char) ||
+      (char > "\x80" &&
+        (char.toUpperCase() != char.toLowerCase() ||
+          nonASCIISingleCaseWordChar.test(char)))
+    );
   }
 
   return (line: string, pos: EditorPosition): EditorRange => {
     let check;
     let start = pos.ch;
     let end = pos.ch;
-    (end === line.length) ? --start : ++end;
+    end === line.length ? --start : ++end;
     const startChar = line.charAt(pos.ch);
     if (isWordChar(startChar)) {
       check = (ch: string) => isWordChar(ch);
     } else if (/\s/.test(startChar)) {
       check = (ch: string) => /\s/.test(ch);
     } else {
-      check = (ch: string) => (!/\s/.test(ch) && !isWordChar(ch));
+      check = (ch: string) => !/\s/.test(ch) && !isWordChar(ch);
     }
 
     while (start > 0 && check(line.charAt(start - 1))) --start;
     while (end < line.length && check(line.charAt(end))) ++end;
-    return { from: { line: pos.line, ch: start }, to: { line: pos.line, ch: end } };
+    return {
+      from: { line: pos.line, ch: start },
+      to: { line: pos.line, ch: end },
+    };
   };
 })();
 
@@ -211,7 +302,11 @@ function getCursor(editor: Editor): EditorRange {
   return { from: editor.getCursor(), to: editor.getCursor() };
 }
 
-function replace(editor: Editor, replaceText: string, replaceRange: EditorRange | null = null): void {
+function replace(
+  editor: Editor,
+  replaceText: string,
+  replaceRange: EditorRange | null = null
+): void {
   // replaceRange is only not null when there isn't anything selected.
   if (replaceRange && replaceRange.from && replaceRange.to) {
     editor.replaceRange(replaceText, replaceRange.from, replaceRange.to);
